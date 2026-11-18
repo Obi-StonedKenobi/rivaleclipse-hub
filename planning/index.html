@@ -111,6 +111,23 @@
   .msg.ok { color: var(--ok); } .msg.err { color: #ff7070; }
   .cat-h { margin: 24px 0 10px; font-size: 1.05rem; color: #f3d27a; }
   .cat-h:first-of-type { margin-top: 4px; }
+  /* Sections tree */
+  .sec-node { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; background: rgba(13,13,21,.65); }
+  .sec-node.done { border-color: #2c5a3a; }
+  .sec-kids { margin-left: 18px; padding-left: 14px; border-left: 2px solid rgba(35,35,47,.9); }
+  .sec-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+  .sec-head input[type="checkbox"] { width: 18px; height: 18px; accent-color: #3ddc84; flex: 0 0 auto; }
+  .sec-head .st { font-weight: 700; font-size: .98rem; }
+  .sec-node details { margin-top: 8px; }
+  .sec-node summary { cursor: pointer; color: var(--muted); font-size: .85rem; font-weight: 600; }
+  .chip { font-size: .75rem; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; }
+  select.mini { width: auto; padding: 5px 8px; font-size: .8rem; }
+  .notif-row { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left; background: none; border: none;
+    border-bottom: 1px solid rgba(35,35,47,.6); padding: 11px 4px; cursor: pointer; color: var(--text); font-family: inherit; font-size: .9rem; }
+  .notif-row .dot { width: 9px; height: 9px; border-radius: 50%; background: #d4af37; margin-top: 6px; flex: 0 0 auto; }
+  .notif-row.read { color: var(--muted); }
+  .notif-row.read .dot { background: transparent; }
+  .bell-n { background: #d4af37; color: #0a0a12; border-radius: 999px; font-size: .72rem; font-weight: 800; padding: 1px 7px; margin-left: 5px; }
   @media (max-width: 860px) {
     .app-shell { grid-template-columns: 1fr; }
     .app-side { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line);
@@ -130,6 +147,7 @@
     <select id="pswitch" class="inp" style="width:auto;max-width:300px" title="Switch project"></select>
     <span class="pill wait" id="pstatus">…</span>
     <div class="pstatus">
+      <button class="btn ghost" type="button" id="bell" title="Inbox" style="padding:7px 12px">🔔<span class="bell-n" id="bell-n" style="display:none"></span></button>
       <span class="dim" id="pwho"></span>
       <svg class="ring" viewBox="0 0 44 44" aria-hidden="true">
         <circle class="track" cx="22" cy="22" r="18" fill="none" stroke-width="5"></circle>
@@ -153,11 +171,20 @@ const CATEGORIES = ['Features & Functions', 'UI & Design', 'Integrations', 'Requ
 let slug = new URLSearchParams(location.search).get('project') || '';
 
 async function api(path, opts = {}) {
-  const r = await fetch(AUTH + path, {
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  let r;
+  try {
+    r = await fetch(AUTH + path, {
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      ...opts,
+    });
+  } catch {
+    // Network-level failure (offline, server unreachable, blocked
+    // request). Return a shaped error instead of throwing, so every
+    // caller shows its normal "couldn't …" message rather than the
+    // browser's raw "Failed to fetch".
+    return { status: 0, data: { ok: false, error: 'could not reach the server — check your connection and try again' } };
+  }
   const data = await r.json().catch(() => ({}));
   return { status: r.status, data };
 }
@@ -186,13 +213,14 @@ let view = 'overview';
 let LIST = null, flash = '';
 const VIEWS = [
   ['plan', 'Plan'],
-  ['overview', 'Overview'], ['roadmap', 'Roadmap'],
+  ['overview', 'Overview'], ['roadmap', 'Roadmap'], ['sections', 'Sections'],
   ['work', 'Work'],
   ['features', 'Features & Functions'], ['ui', 'UI & Design'], ['requirements', 'Requirements & Checklists'],
   ['team', 'People'],
   ['notes', 'Notes'], ['suggestions', 'Suggestions'], ['files', 'Files & Uploads'], ['members', 'Team & access'],
+  ['requests', 'Requests & Questions'], ['activity', 'Activity'],
   ['review-grp', 'Review'],
-  ['review', 'Review queue'], ['submissions', 'My submissions'],
+  ['review', 'Review queue'], ['submissions', 'My submissions'], ['mywork', 'My work'], ['inbox', 'Inbox'],
 ];
 
 // ---------- project list, picker, switcher ----------
@@ -204,13 +232,19 @@ async function loadList() {
     .map((p) => `<option value="${esc(p.slug)}"${p.slug === slug ? ' selected' : ''}>${esc(p.title)}</option>`).join('');
   sw.value = slug;
 }
-function selectProject(newSlug) {
+let nextView = '';
+function selectProject(newSlug, afterView = '') {
   slug = newSlug || '';
-  FULL = null; view = 'overview';
+  FULL = null; view = 'overview'; nextView = afterView;
   history.pushState(null, '', slug ? '?project=' + encodeURIComponent(slug) : location.pathname);
   reload(false);
 }
 document.getElementById('pswitch').addEventListener('change', (e) => selectProject(e.target.value));
+document.getElementById('bell').addEventListener('click', () => {
+  if (!FULL) return;
+  view = 'inbox';
+  renderChrome(); renderView();
+});
 
 function renderPicker() {
   document.title = 'Brainstorming & Planning — Rival Eclipse';
@@ -233,7 +267,7 @@ function renderPicker() {
   }
   el.innerHTML = `
     <h2 class="vt">Brainstorming &amp; Planning</h2>
-    <p class="vsub">Pick a project to open it. Dev-team members can view every project; edits from non-admins are held for admin review before they become permanent.${canAdmin && LIST.pending_reviews ? ` <b>${LIST.pending_reviews} change${LIST.pending_reviews === 1 ? '' : 's'} waiting for review</b> across all projects.` : ''}</p>
+    <p class="vsub">Pick a project to open it. Dev-team members can view every project; edits from non-admins are held for admin review before they become permanent.${canAdmin && LIST.pending_reviews ? ` <b>${LIST.pending_reviews} change${LIST.pending_reviews === 1 ? '' : 's'} waiting for review</b> across all projects.` : ''}${LIST.my_notifications_unread ? ` <b>${LIST.my_notifications_unread} unread</b> in your inbox (open any project → Inbox).` : ''}</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
       ${projects.map((p) => `
         <button type="button" class="card" data-pick="${esc(p.slug)}" style="text-align:left;cursor:pointer;margin:0">
@@ -257,6 +291,7 @@ async function reload(keepView = true) {
     return;
   }
   FULL = data;
+  if (nextView) { view = nextView; nextView = ''; }
   renderChrome();
   renderView();
   if (!keepView) window.scrollTo({ top: 0 });
@@ -276,13 +311,21 @@ function renderChrome() {
   const openSugg = FULL.suggestions.filter((x) => x.status === 'open').length;
   const counts = {
     overview: '', roadmap: FULL.milestones.length,
+    sections: FULL.stats.sections ? `${FULL.stats.sections.done}/${FULL.stats.sections.total}` : '',
     features: FULL.features.length, ui: FULL.uploads.filter((u) => u.section.startsWith('ui_') || u.section === 'design').length,
     requirements: `${FULL.stats.requirements.done}/${FULL.stats.requirements.total}`,
     notes: FULL.notes.length, suggestions: openSugg || '', files: FULL.uploads.length,
     members: (FULL.dev_team || []).length + (FULL.helpers || []).length || FULL.members.length,
+    requests: FULL.requests.filter((r) => r.status !== 'resolved').length || '',
+    activity: '',
     review: canAdmin ? (FULL.access?.pending_changes || '') : '',
     submissions: FULL.access?.my_pending_changes || '',
+    mywork: '', inbox: FULL.access?.notifications_unread || '',
   };
+  const bellN = document.getElementById('bell-n');
+  const unread = FULL.access?.notifications_unread || 0;
+  bellN.style.display = unread ? '' : 'none';
+  bellN.textContent = unread || '';
   let html = '';
   let lastGrp = null;
   for (const [key, label] of VIEWS) {
@@ -295,9 +338,10 @@ function renderChrome() {
 function renderView() {
   const el = document.getElementById('view');
   if (!FULL) return;
-  ({ overview: vOverview, roadmap: vRoadmap, features: vFeatures, ui: vUI,
+  ({ overview: vOverview, roadmap: vRoadmap, sections: vSections, features: vFeatures, ui: vUI,
      requirements: vRequirements, notes: vNotes, suggestions: vSuggestions,
-     files: vFiles, members: vMembers, review: vReview, submissions: vSubmissions }[view] || vOverview)(el);
+     files: vFiles, members: vMembers, requests: vRequests, activity: vActivity,
+     review: vReview, submissions: vSubmissions, mywork: vMyWork, inbox: vInbox }[view] || vOverview)(el);
   if (flash) {
     el.insertAdjacentHTML('afterbegin', `<div class="card" style="border-color:var(--gold)"><b>📨 ${esc(flash)}</b></div>`);
     flash = '';
@@ -321,7 +365,8 @@ const reqRow = (r) => `
     <input type="checkbox" data-check-req="${r.id}" ${r.done ? 'checked' : ''}>
     <span class="rt">${esc(r.text)}</span>
     ${r.done ? `<span class="who">✓ ${esc(r.done_by || '')} · ${esc(fmtDate(r.done_at))}</span>` : ''}
-    <button class="btn ghost" type="button" data-del-req="${r.id}" title="Delete this requirement" style="padding:2px 9px;margin-left:auto">×</button>
+    <span style="margin-left:auto">${assignSelect(`data-req-assign="${r.id}"`, r.assignee_email || '')}</span>
+    <button class="btn ghost" type="button" data-del-req="${r.id}" title="Delete this requirement" style="padding:2px 9px">×</button>
   </div>`;
 const reqList = (reqs) => reqs.length ? reqs.map(reqRow).join('') : '<p class="dim">No checklist items yet.</p>';
 const noteRow = (n, featTitle) => `
@@ -366,9 +411,12 @@ function readFileB64(file) {
     fr.readAsDataURL(file);
   });
 }
-const uploadForm = (section, featureId, label) => `
-  <form data-form="upload" data-section="${section}" data-fid="${featureId || ''}" style="margin-top:10px">
+const uploadForm = (section, featureId, label, conceptId) => `
+  <form data-form="upload" data-section="${section}" data-fid="${featureId || ''}"${conceptId ? ` data-concept="${conceptId}"` : ''} style="margin-top:10px">
     <div class="row-flex">
+      <input class="inp" type="text" name="title" placeholder="${section === 'design' ? 'Concept title for this upload' : 'Title (optional)'}" style="flex:1;min-width:170px">
+    </div>
+    <div class="row-flex" style="margin-top:8px">
       <input class="inp" type="file" name="file" required style="width:auto;flex:1;min-width:170px">
       <button class="btn ghost" type="submit">${esc(label || 'Upload')}</button>
     </div>
@@ -384,6 +432,47 @@ const latestUp = (section, featureId) => FULL.uploads
   .filter((u) => u.section === section && (u.feature_id || null) === (featureId || null))
   .sort((a, b) => b.version - a.version)[0];
 const featTitle = (fid) => (FULL.features.find((f) => f.id === fid) || {}).title || '';
+
+// ---------- people, sections, discussion helpers ----------
+const people = () => {
+  const out = new Map();
+  for (const m of FULL.dev_team || []) out.set(m.email, m.name || m.email);
+  for (const h of FULL.helpers || []) if (!out.has(h.user_email)) out.set(h.user_email, h.user_email);
+  const p = FULL.project;
+  if (p.created_by_email && !out.has(p.created_by_email)) out.set(p.created_by_email, p.created_by_name || p.created_by_email);
+  return [...out.entries()].map(([email, name]) => ({ email, name }));
+};
+const personName = (email) => (people().find((x) => x.email === email) || {}).name || email || '';
+const assignSelect = (attr, current) => `
+  <select class="inp mini" ${attr} title="Assigned to">
+    <option value="">Unassigned</option>
+    ${people().map((x) => `<option value="${esc(x.email)}"${x.email === current ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}
+  </select>`;
+const secName = (sid) => (FULL.sections.find((s) => s.id === sid) || {}).title || '';
+const secFlat = () => {
+  const out = [];
+  const walk = (parentId, depth) => {
+    for (const s of FULL.sections.filter((x) => (x.parent_id || null) === parentId)) {
+      out.push({ s, depth });
+      walk(s.id, depth + 1);
+    }
+  };
+  walk(null, 0);
+  return out;
+};
+const secOptions = (selected, excludeId) => secFlat()
+  .filter(({ s }) => s.id !== excludeId)
+  .map(({ s, depth }) => `<option value="${s.id}"${s.id === selected ? ' selected' : ''}>${'&nbsp;&nbsp;'.repeat(depth)}${esc(s.title)}</option>`).join('');
+const commentsBlock = (etype, eid) => {
+  const items = FULL.comments.filter((c) => c.entity_type === etype && c.entity_id === eid);
+  return `<div style="margin-top:10px">
+    ${items.map((c) => `<div class="note-row"><div class="nh">${esc(c.author_name || c.author_email)} · ${esc(fmtDate(c.created_at))}</div><div class="nb">${esc(c.body)}</div></div>`).join('') || '<p class="dim">No discussion yet.</p>'}
+    <form data-form="comment" data-etype="${etype}" data-eid="${eid}"><div class="row-flex">
+      <input class="inp" name="body" maxlength="8000" placeholder="Write a comment…" required style="flex:1;min-width:180px">
+      <button class="btn ghost" type="submit">Comment</button>
+    </div></form>
+  </div>`;
+};
 
 // ---------- Finalize ----------
 // Available only at 100% requirements. Finalizing locks every edit for
@@ -453,6 +542,14 @@ function vOverview(el) {
       <div class="stat"><div class="n">${st.features}</div><div class="l">Features</div></div>
       <div class="stat"><div class="n">${(FULL.dev_team || []).length + (FULL.helpers || []).length}</div><div class="l">People with access</div></div>
     </div>
+    <div class="card"><h3>Completion</h3>
+      ${(FULL.sections || []).filter((s) => !s.parent_id).map((s) => `
+        <div style="margin-bottom:12px"><div class="row-flex" style="justify-content:space-between">
+          <span><input type="checkbox" disabled ${s.state.complete ? 'checked' : ''} style="accent-color:#3ddc84;width:16px;height:16px;vertical-align:-3px"> <b>${esc(s.title)}</b>${s.state.complete && s.state.source === 'rollup' ? ' <span class="pill vio">automatic</span>' : ''}</span>
+          <span class="dim">${s.state.leaves_done}/${s.state.leaves_total} sections</span></div>
+          ${pbar(s.state.leaves_done, s.state.leaves_total)}</div>`).join('') || '<p class="dim">No sections yet.</p>'}
+      <div class="dim">${st.sections ? `${st.sections.done}/${st.sections.total} sections complete (${st.sections.pct}%)` : ''} · Full tree under <b>Sections</b>.</div>
+    </div>
     <div class="card"><h3>Roadmap snapshot</h3>
       ${FULL.milestones.map((m) => `<div class="ms-row"><span class="ms-dot ${esc(m.status)}"></span>
         <div style="flex:1"><b>${esc(m.title)}</b> <span class="pill ${m.status === 'done' ? 'ok' : m.status === 'in_progress' ? 'wait' : ''}">${esc(m.status.replace('_', ' '))}</span>
@@ -463,7 +560,9 @@ function vOverview(el) {
         <div style="margin-bottom:12px"><div class="row-flex" style="justify-content:space-between"><b>${esc(c)}</b>
         <span class="dim">${st.byCategory[c].done}/${st.byCategory[c].total} · ${st.byCategory[c].pct}%</span></div>${pbar(st.byCategory[c].done, st.byCategory[c].total)}</div>`).join('') || '<p class="dim">No requirements yet.</p>'}
     </div>
-    <div class="card"><h3>Recent activity</h3>${recent.map((r) => r.html).join('') || '<p class="dim">No notes or suggestions yet.</p>'}</div>`;
+    <div class="card"><h3>Recent activity</h3>${(FULL.activity && FULL.activity.length)
+      ? FULL.activity.slice(0, 8).map((a) => `<div class="note-row"><div class="nh">${esc(a.actor_name || a.actor_email)} · ${esc(fmtDate(a.created_at))}</div><div class="nb">${esc(a.summary)}</div></div>`).join('')
+      : (recent.map((r) => r.html).join('') || '<p class="dim">No activity yet.</p>')}</div>`;
   wireFinCard();
 }
 
@@ -477,13 +576,20 @@ function vRoadmap(el) {
       ${FULL.milestones.map((m) => `
         <div class="ms-row"><span class="ms-dot ${esc(m.status)}"></span>
           <div style="flex:1"><b>${esc(m.title)}</b>
+            ${m.section_id ? `<span class="chip">🔗 ${esc(secName(m.section_id))}</span>` : ''}
+            ${m.auto_done ? '<span class="pill ok">✓ checked automatically</span>' : ''}
             ${m.description ? `<div class="dim" style="margin-top:2px">${esc(m.description)}</div>` : ''}
             <div class="row-flex" style="margin-top:8px">
-              <select class="inp" data-ms-status="${m.id}" style="width:auto;padding:6px 10px">
+              <select class="inp" data-ms-status="${m.id}" style="width:auto;padding:6px 10px" ${m.auto_done ? 'disabled title="Checked automatically — driven by its linked section"' : ''}>
                 ${['upcoming', 'in_progress', 'done'].map((st) => `<option value="${st}"${m.status === st ? ' selected' : ''}>${st.replace('_', ' ')}</option>`).join('')}
               </select>
               <input class="inp" type="date" data-ms-due="${m.id}" value="${esc(m.due_date || '')}" style="width:auto">
               ${m.due_date ? `<span class="dim">due ${esc(m.due_date)}</span>` : '<span class="dim">no due date</span>'}
+              ${assignSelect(`data-ms-assign="${m.id}"`, m.assignee_email || '')}
+              <select class="inp mini" data-ms-section="${m.id}" title="Linked section">
+                <option value="">No linked section</option>
+                ${secOptions(m.section_id)}
+              </select>
               <button class="btn ghost" type="button" data-del-ms="${m.id}">Delete</button>
             </div>
           </div>
@@ -493,6 +599,9 @@ function vRoadmap(el) {
       <form data-form="milestone"><div class="form-grid">
         <div><label>Title</label><input class="inp" name="title" maxlength="200" required></div>
         <div><label>Due date</label><input class="inp" type="date" name="due_date"></div>
+        <div><label>Linked section (checks itself off when the section completes)</label>
+          <select class="inp" name="section_id"><option value="">None</option>${secOptions(null)}</select></div>
+        <div><label>Assigned to</label><select class="inp" name="assignee_email"><option value="">Unassigned</option>${people().map((x) => `<option value="${esc(x.email)}">${esc(x.name)}</option>`).join('')}</select></div>
         <div class="full"><label>Description</label><textarea class="inp" name="description" maxlength="2000"></textarea></div>
       </div><button class="btn" type="submit" style="margin-top:10px">Add milestone</button></form>
     </div>`;
@@ -508,6 +617,7 @@ function featureCard(f) {
       <span style="margin-left:auto"><select class="inp" data-feat-status="${f.id}" style="width:auto;padding:6px 10px">
         ${['planned', 'in_progress', 'done'].map((st) => `<option value="${st}"${f.status === st ? ' selected' : ''}>${st.replace('_', ' ')}</option>`).join('')}
       </select></span>
+      ${assignSelect(`data-feat-assign="${f.id}"`, f.assignee_email || '')}
       <button class="btn ghost" type="button" data-edit-feature="${f.id}">Edit</button>
       <button class="btn ghost" type="button" data-del-feature="${f.id}">Delete</button>
     </div>
@@ -570,16 +680,53 @@ function uiBox(kind, section, f) {
     ${uploadForm(section, f.id, kind === 'Before' ? 'Upload before render' : 'Upload suggested update')}
   </div>`;
 }
+const moveForm = (u) => `
+  <form data-form="upload-move" data-uid="${u.id}" class="row-flex" style="margin-top:6px">
+    <select class="inp" name="concept_id" style="width:auto;flex:1;min-width:150px">
+      <option value="">Unfiled</option>
+      ${(FULL.concepts || []).map((c) => `<option value="${c.id}"${(u.concept_id || null) === c.id ? ' selected' : ''}>${esc(c.title)}</option>`).join('')}
+    </select>
+    <button class="btn ghost" type="submit">Move</button>
+    <span class="msg"></span>
+  </form>`;
+const designRow = (u) => `
+  <div class="file-row" style="display:block">
+    <div class="row-flex"><span><b>${esc(u.title)}</b> <span class="pill vio">v${u.version}</span><br>
+    <span class="dim">${esc(u.filename)} · ${esc(fmtSize(u.size))} · ${esc(u.author_name || u.author_email)} · ${esc(fmtDate(u.created_at))}</span></span>
+    <span style="margin-left:auto"><a class="dl" href="${dlUrl(u.id)}">Download ↓</a></span></div>
+    ${String(u.mime).startsWith('image/') ? `<img src="${dlUrl(u.id)}" alt="${esc(u.title)}" style="max-width:100%;border-radius:10px;margin-top:8px">` : ''}
+    ${moveForm(u)}
+  </div>`;
+function conceptCard(c) {
+  const ups = FULL.uploads.filter((u) => u.section === 'design' && (u.concept_id || null) === c.id);
+  return `<div class="card"><h3>${esc(c.title)} <span class="dim" style="font-weight:400">(${ups.length})</span></h3>
+    ${ups.map(designRow).join('') || '<p class="dim">Nothing uploaded yet — add the first render for this concept below.</p>'}
+    ${uploadForm('design', '', 'Add', c.id)}
+    <div class="row-flex" style="margin-top:10px">
+      <form data-form="concept-rename" data-cid="${c.id}" class="row-flex" style="flex:1">
+        <input class="inp" type="text" name="title" value="${esc(c.title)}" style="flex:1;min-width:140px">
+        <button class="btn ghost" type="submit">Rename</button>
+      </form>
+      <button class="btn ghost" type="button" data-del-concept="${c.id}">Delete concept</button>
+    </div>
+    <p class="msg"></p>
+  </div>`;
+}
 function vUI(el) {
-  const designs = FULL.uploads.filter((u) => u.section === 'design');
+  const concepts = FULL.concepts || [];
+  const unfiled = FULL.uploads.filter((u) => u.section === 'design' && !u.concept_id);
   el.innerHTML = `
     <h2 class="vt">UI &amp; Design</h2>
-    <p class="vsub">Per feature: the “Before” render (download it, mark it up, re-upload as a suggested update) beside the suggested updates. Every upload is a new version — nothing is ever overwritten.</p>
-    ${FULL.features.map((f) => `<div class="card"><h3>${esc(f.title)}</h3><div class="ui-grid">${uiBox('Before', 'ui_before', f)}${uiBox('Suggested updates', 'ui_suggested', f)}</div></div>`).join('') || '<p class="dim">Add features first — each one gets its own Before / Suggested pair here.</p>'}
-    <div class="card"><h3>Design uploads</h3>
-      ${designs.map(upRow).join('') || '<p class="dim">No design uploads yet.</p>'}
-      ${uploadForm('design', '', 'Upload design')}
-    </div>`;
+    <p class="vsub">Visual concepts first: each concept is one screen or element to design. Add a render under its concept with a title; add or delete concepts as the design takes shape. Per feature, the “Before” render (download it, mark it up, re-upload as a suggested update) sits beside the suggested updates. Every upload is a new version — nothing is ever overwritten.</p>
+    <div class="card"><h3>Add a concept</h3>
+      <form data-form="concept-add"><div class="row-flex">
+        <input class="inp" type="text" name="title" placeholder="e.g. Checkout page" required style="flex:1;min-width:170px">
+        <button class="btn" type="submit">Add concept</button>
+      </div><p class="msg"></p></form>
+    </div>
+    ${concepts.map(conceptCard).join('')}
+    ${unfiled.length ? `<div class="card"><h3>Unfiled design uploads (${unfiled.length})</h3>${unfiled.map(designRow).join('')}</div>` : ''}
+    ${FULL.features.map((f) => `<div class="card"><h3>${esc(f.title)}</h3><div class="ui-grid">${uiBox('Before', 'ui_before', f)}${uiBox('Suggested updates', 'ui_suggested', f)}</div></div>`).join('') || '<p class="dim">Add features first — each one gets its own Before / Suggested pair here.</p>'}`;
 }
 
 // ---------- Requirements & Checklists ----------
@@ -608,6 +755,164 @@ function vRequirements(el) {
           <div style="margin-top:8px">${reqList(f.requirements)}</div>
         </div>`).join('');
     }).join('')}`;
+}
+
+// ---------- Sections (the workshop tree) ----------
+// Completion lives on the leaves: an admin presses Complete, and every
+// parent above it checks itself off automatically once all of its
+// subsections are complete. The checkbox is the state; the button is
+// the action. Non-admins propose structural changes like everything
+// else — their adds/renames land in the review queue.
+function secNode(s) {
+  const kids = FULL.sections.filter((x) => x.parent_id === s.id);
+  const st = s.state || {};
+  const reqs = FULL.requirements.filter((r) => r.section_id === s.id && !r.feature_id);
+  const feats = s.kind === 'category' ? FULL.features.filter((f) => f.category === s.category_key) : [];
+  const isLeaf = !kids.length;
+  return `<div class="sec-node${st.complete ? ' done' : ''}">
+    <div class="sec-head">
+      <input type="checkbox" disabled ${st.complete ? 'checked' : ''}>
+      <span class="st">${esc(s.title)}</span>
+      ${st.complete ? `<span class="pill ok">✓ Complete</span>${st.source === 'rollup' ? '<span class="pill vio">automatic</span>' : ''}` : ''}
+      ${!isLeaf ? `<span class="dim">${st.leaves_done}/${st.leaves_total}</span>` : ''}
+      ${s.assignee_email ? `<span class="chip">👤 ${esc(personName(s.assignee_email))}</span>` : ''}
+      <span style="margin-left:auto" class="row-flex">
+        ${assignSelect(`data-sec-assign="${s.id}"`, s.assignee_email || '')}
+        ${canAdmin && isLeaf && !st.complete ? `<button class="btn" type="button" data-complete-sec="${s.id}" style="padding:7px 14px">Complete</button>` : ''}
+        ${canAdmin && isLeaf && st.complete ? `<button class="btn ghost" type="button" data-reopen-sec="${s.id}" style="padding:7px 14px">Reopen</button>` : ''}
+        ${canAdmin && !isLeaf && !st.complete ? '<span class="dim">Completes automatically</span>' : ''}
+        <button class="btn ghost" type="button" data-edit-section="${s.id}" style="padding:7px 12px">Edit</button>
+        ${s.kind !== 'category' ? `<button class="btn ghost" type="button" data-del-section="${s.id}" style="padding:7px 12px">Delete</button>` : ''}
+      </span>
+    </div>
+    ${s.description ? `<p class="dim" style="margin:6px 0 0">${esc(s.description)}</p>` : ''}
+    ${st.complete ? `<div class="dim" style="margin-top:4px">✓ ${esc(st.completed_by || '')} · ${esc(fmtDate(st.completed_at))}</div>` : ''}
+    <form data-form="section-edit" data-sid="${s.id}" id="sedit-${s.id}" hidden style="margin-top:10px"><div class="form-grid">
+      <div><label>Title</label><input class="inp" name="title" maxlength="200" value="${esc(s.title)}" required></div>
+      <div><label>Inside</label><select class="inp" name="parent_id"><option value="">Top level</option>${secOptions(s.parent_id, s.id)}</select></div>
+      <div class="full"><label>Description</label><textarea class="inp" name="description" maxlength="4000">${esc(s.description || '')}</textarea></div>
+    </div><button class="btn" type="submit" style="margin-top:10px">Save section</button><p class="msg"></p></form>
+    <details>
+      <summary>Checklist (${reqs.filter((r) => r.done).length}/${reqs.length}) · Discussion (${FULL.comments.filter((c) => c.entity_type === 'section' && c.entity_id === s.id).length})${feats.length ? ` · Features (${feats.length})` : ''}</summary>
+      ${feats.length ? `<div style="margin-top:8px">${feats.map((f) => `<div class="file-row"><span>${esc(f.title)}</span><span class="pill ${f.status === 'done' ? 'ok' : f.status === 'in_progress' ? 'wait' : ''}" style="margin-left:auto">${esc(f.status.replace('_', ' '))}</span></div>`).join('')}</div>` : ''}
+      <div style="margin-top:8px">${reqList(reqs)}</div>
+      <form data-form="req" data-sid="${s.id}" style="margin-top:8px"><div class="row-flex">
+        <input class="inp" name="text" maxlength="500" placeholder="Add a checklist item…" required style="flex:1;min-width:180px">
+        <button class="btn ghost" type="submit">Add</button>
+      </div></form>
+      ${commentsBlock('section', s.id)}
+    </details>
+    <form data-form="section" data-parent="${s.id}" style="margin-top:10px"><div class="row-flex">
+      <input class="inp" name="title" maxlength="200" placeholder="Add a subsection…" required style="flex:1;min-width:180px">
+      <button class="btn ghost" type="submit">Add subsection</button>
+    </div></form>
+    ${kids.length ? `<div class="sec-kids" style="margin-top:12px">${kids.map(secNode).join('')}</div>` : ''}
+  </div>`;
+}
+function vSections(el) {
+  const st = FULL.stats.sections || { done: 0, total: 0, pct: 0 };
+  const roots = FULL.sections.filter((s) => !s.parent_id);
+  el.innerHTML = `
+    <h2 class="vt">Sections</h2>
+    <p class="vsub">${st.done} of ${st.total} sections complete (${st.pct}%).</p>
+    ${pbar(st.done, st.total)}
+    <div style="margin-top:16px">${roots.map(secNode).join('') || '<p class="dim">No sections yet.</p>'}</div>
+    <div class="card"><h3>Add a top-level section</h3>
+      <form data-form="section" data-parent=""><div class="row-flex">
+        <input class="inp" name="title" maxlength="200" placeholder="Section title…" required style="flex:1;min-width:200px">
+        <button class="btn" type="submit">Add section</button>
+      </div></form>
+    </div>`;
+}
+
+// ---------- Requests & Questions ----------
+function vRequests(el) {
+  const items = FULL.requests;
+  const canDrive = (r) => canAdmin || r.author_email === (me.email || '') || r.assignee_email === (me.email || '');
+  el.innerHTML = `
+    <h2 class="vt">Requests &amp; Questions</h2>
+    <p class="vsub">${items.filter((r) => r.status !== 'resolved').length} open · ${items.filter((r) => r.status === 'resolved').length} resolved.</p>
+    <div class="card"><h3>Ask or request something</h3>
+      <form data-form="request"><div class="form-grid">
+        <div><label>Type</label><select class="inp" name="kind"><option value="request">Request</option><option value="question">Question</option></select></div>
+        <div><label>Assigned to</label><select class="inp" name="assignee_email"><option value="">Unassigned</option>${people().map((x) => `<option value="${esc(x.email)}">${esc(x.name)}</option>`).join('')}</select></div>
+        <div class="full"><label>Title</label><input class="inp" name="title" maxlength="200" required></div>
+        <div class="full"><label>Details</label><textarea class="inp" name="body" maxlength="8000"></textarea></div>
+      </div><button class="btn" type="submit" style="margin-top:10px">Post</button><p class="msg"></p></form>
+    </div>
+    ${items.map((r) => `
+      <div class="card">
+        <div class="feat-head">
+          <span class="pill ${r.kind === 'question' ? 'vio' : 'wait'}">${esc(r.kind)}</span>
+          <span class="nm">${esc(r.title)}</span>
+          <span class="pill ${r.status === 'resolved' ? 'ok' : r.status === 'answered' ? 'vio' : 'wait'}" style="margin-left:auto">${esc(r.status)}</span>
+        </div>
+        ${r.body ? `<p style="white-space:pre-line;line-height:1.6;margin:6px 0">${esc(r.body)}</p>` : ''}
+        <div class="dim">${esc(r.author_name || r.author_email)} · ${esc(fmtDate(r.created_at))}${r.status === 'resolved' ? ` · resolved by ${esc(personName(r.resolved_by))} · ${esc(fmtDate(r.resolved_at))}` : ''}</div>
+        <div class="row-flex" style="margin-top:10px">
+          ${canDrive(r) ? assignSelect(`data-rq-assign="${r.id}"`, r.assignee_email || '') : (r.assignee_email ? `<span class="chip">👤 ${esc(personName(r.assignee_email))}</span>` : '')}
+          ${canDrive(r) && r.status === 'open' ? `<button class="btn ghost" type="button" data-rq-status="${r.id}|answered">Mark answered</button>` : ''}
+          ${canDrive(r) && r.status !== 'resolved' ? `<button class="btn" type="button" data-rq-status="${r.id}|resolved" style="padding:8px 16px">Resolve</button>` : ''}
+          ${canDrive(r) && r.status === 'resolved' ? `<button class="btn ghost" type="button" data-rq-status="${r.id}|open">Reopen</button>` : ''}
+        </div>
+        ${commentsBlock('request', r.id)}
+      </div>`).join('') || '<p class="dim">Nothing posted yet.</p>'}`;
+}
+
+// ---------- Activity (discussion + record) ----------
+function vActivity(el) {
+  el.innerHTML = `
+    <h2 class="vt">Activity</h2>
+    <p class="vsub">Project discussion and the full record of what happened, as it happened.</p>
+    <div class="card"><h3>Discussion</h3>${commentsBlock('project', FULL.project.id)}</div>
+    <div class="card"><h3>Record</h3>
+      ${(FULL.activity || []).map((a) => `<div class="note-row"><div class="nh">${esc(a.actor_name || a.actor_email)} · ${esc(fmtDate(a.created_at))}</div><div class="nb">${esc(a.summary)}</div></div>`).join('') || '<p class="dim">No activity yet.</p>'}
+    </div>`;
+}
+
+// ---------- My work ----------
+function vMyWork(el) {
+  el.innerHTML = `<h2 class="vt">My work</h2><p class="vsub">Everything assigned to you, across every project.</p><div data-review-ui id="workBody"><p class="dim">Loading…</p></div>`;
+  (async () => {
+    const body = document.getElementById('workBody');
+    if (!body) return;
+    const { data } = await api('/api/bp/my-work');
+    const items = data.items || [];
+    const byProject = new Map();
+    for (const i of items) {
+      if (!byProject.has(i.project_slug)) byProject.set(i.project_slug, { title: i.project_title, items: [] });
+      byProject.get(i.project_slug).items.push(i);
+    }
+    body.innerHTML = items.length ? [...byProject.entries()].map(([slug, g]) => `
+      <div class="card"><h3>${esc(g.title)}</h3>
+      ${g.items.map((i) => `<div class="file-row"><span><span class="pill vio">${esc(i.type)}</span> <b>${esc(i.title)}</b>${i.due_date ? ` <span class="dim">due ${esc(i.due_date)}</span>` : ''}</span>
+        <span style="margin-left:auto"><button class="btn ghost" type="button" data-work-pick="${esc(slug)}|${esc(i.view || 'overview')}">Open</button></span></div>`).join('')}
+      </div>`).join('') : '<div class="card"><p>Nothing is assigned to you right now. 🎉</p></div>';
+  })();
+}
+
+// ---------- Inbox ----------
+function vInbox(el) {
+  el.innerHTML = `<h2 class="vt">Inbox</h2><p class="vsub">Reviews waiting, decisions on your submissions, assignments, requests, and discussion — across every project.</p>
+    <div data-review-ui id="inboxBody"><p class="dim">Loading…</p></div>`;
+  (async () => {
+    const body = document.getElementById('inboxBody');
+    if (!body) return;
+    const { data } = await api('/api/bp/notifications');
+    const items = data.notifications || [];
+    body.innerHTML = `
+      ${items.length ? '<div style="margin-bottom:12px"><button class="btn ghost" type="button" id="inbox-read-all">Mark all read</button></div>' : ''}
+      <div class="card" style="padding:6px 14px">
+      ${items.map((n) => `<button type="button" class="notif-row${n.is_read ? ' read' : ''}" data-notif="${n.id}|${esc(n.project_slug || '')}|${esc(n.view || '')}">
+        <span class="dot"></span><span style="flex:1">${esc(n.summary)}<br><span class="dim">${esc(n.project_title || '')} · ${esc(fmtDate(n.created_at))}</span></span>
+      </button>`).join('') || '<p class="dim" style="padding:12px 0">Your inbox is empty.</p>'}
+      </div>`;
+    const all = document.getElementById('inbox-read-all');
+    if (all) all.addEventListener('click', async () => {
+      await api('/api/bp/notifications/read-all', { method: 'POST', body: '{}' });
+      reload();
+    });
+  })();
 }
 
 // ---------- Notes ----------
@@ -844,6 +1149,66 @@ viewEl.addEventListener('click', async (e) => {
     if (status === 200) { notePending(data); reload(); } else alert('Could not delete: ' + (data.error || status));
     return;
   }
+  const dc = e.target.closest('[data-del-concept]');
+  if (dc) {
+    if (!confirm('Delete this design concept? Its uploads stay, unfiled.')) return;
+    const { status, data } = await api('/api/bp/concepts/' + dc.dataset.delConcept, { method: 'DELETE' });
+    if (status === 200) { notePending(data); reload(); } else alert('Could not delete: ' + (data.error || status));
+    return;
+  }
+  const cs = e.target.closest('[data-complete-sec]');
+  if (cs) {
+    cs.disabled = true;
+    const { status, data } = await api('/api/bp/sections/' + cs.dataset.completeSec + '/complete', { method: 'POST', body: '{}' });
+    if (status === 200) { flash = 'Section marked complete.'; reload(); }
+    else {
+      cs.disabled = false;
+      alert(status === 409 && data.incomplete
+        ? 'These subsections still need completing first: ' + data.incomplete.map((x) => x.title).join(', ')
+        : 'Could not complete: ' + (data.error || status));
+    }
+    return;
+  }
+  const rs = e.target.closest('[data-reopen-sec]');
+  if (rs) {
+    if (!confirm('Reopen this section? Anything it was holding complete — parent sections and linked milestones — reopens with it.')) return;
+    const { status, data } = await api('/api/bp/sections/' + rs.dataset.reopenSec + '/reopen', { method: 'POST', body: '{}' });
+    if (status === 200) reload(); else alert('Could not reopen: ' + (data.error || status));
+    return;
+  }
+  const es = e.target.closest('[data-edit-section]');
+  if (es) { const f = document.getElementById('sedit-' + es.dataset.editSection); if (f) f.hidden = !f.hidden; return; }
+  const ds = e.target.closest('[data-del-section]');
+  if (ds) {
+    if (!confirm('Delete this section? Its subsections and content move up a level — nothing is lost.')) return;
+    const { status, data } = await api('/api/bp/sections/' + ds.dataset.delSection, { method: 'DELETE' });
+    if (status === 200) { notePending(data); reload(); } else alert('Could not delete: ' + (data.error || status));
+    return;
+  }
+  const rq = e.target.closest('[data-rq-status]');
+  if (rq) {
+    const [rid, st] = rq.dataset.rqStatus.split('|');
+    rq.disabled = true;
+    const { status, data } = await api('/api/bp/requests/' + rid, { method: 'PATCH', body: JSON.stringify({ status: st }) });
+    if (status === 200) reload(); else { rq.disabled = false; alert('Could not update: ' + (data.error || status)); }
+    return;
+  }
+  const nf = e.target.closest('[data-notif]');
+  if (nf) {
+    const [nid, pslug, vw] = nf.dataset.notif.split('|');
+    await api('/api/bp/notifications/' + nid + '/read', { method: 'POST', body: '{}' });
+    if (pslug && pslug !== slug) selectProject(pslug, vw || 'overview');
+    else if (pslug && vw) { view = vw; reload(); }
+    else reload();
+    return;
+  }
+  const wp = e.target.closest('[data-work-pick]');
+  if (wp) {
+    const [pslug, vw] = wp.dataset.workPick.split('|');
+    if (pslug && pslug !== slug) selectProject(pslug, vw || 'overview');
+    else { view = vw || 'overview'; renderChrome(); renderView(); }
+    return;
+  }
 });
 viewEl.addEventListener('change', async (e) => {
   const t = e.target;
@@ -873,6 +1238,35 @@ viewEl.addEventListener('change', async (e) => {
     const { status } = await api('/api/bp/suggestions/' + t.dataset.suggStatus, { method: 'PATCH', body: JSON.stringify({ status: t.value }) });
     if (status === 200) reload();
   }
+  if (t.matches('[data-sec-assign]')) {
+    const { data } = await api('/api/bp/sections/' + t.dataset.secAssign, { method: 'PATCH', body: JSON.stringify({ assignee_email: t.value || null }) });
+    notePending(data);
+    reload();
+  }
+  if (t.matches('[data-feat-assign]')) {
+    const { data } = await api('/api/bp/features/' + t.dataset.featAssign, { method: 'PATCH', body: JSON.stringify({ assignee_email: t.value || null }) });
+    notePending(data);
+    reload();
+  }
+  if (t.matches('[data-req-assign]')) {
+    const { data } = await api('/api/bp/requirements/' + t.dataset.reqAssign, { method: 'PATCH', body: JSON.stringify({ assignee_email: t.value || null }) });
+    notePending(data);
+    reload();
+  }
+  if (t.matches('[data-ms-assign]')) {
+    const { data } = await api('/api/bp/milestones/' + t.dataset.msAssign, { method: 'PATCH', body: JSON.stringify({ assignee_email: t.value || null }) });
+    notePending(data);
+    reload();
+  }
+  if (t.matches('[data-ms-section]')) {
+    const { data } = await api('/api/bp/milestones/' + t.dataset.msSection, { method: 'PATCH', body: JSON.stringify({ section_id: t.value ? Number(t.value) : null }) });
+    notePending(data);
+    reload();
+  }
+  if (t.matches('[data-rq-assign]')) {
+    const { status, data } = await api('/api/bp/requests/' + t.dataset.rqAssign, { method: 'PATCH', body: JSON.stringify({ assignee_email: t.value || null }) });
+    if (status === 200) reload(); else alert('Could not assign: ' + (data.error || status));
+  }
 });
 viewEl.addEventListener('submit', async (e) => {
   const form = e.target.closest('form[data-form]');
@@ -894,15 +1288,29 @@ viewEl.addEventListener('submit', async (e) => {
       if (status !== 200) throw new Error(data.error || 'failed');
       notePending(data);
     } else if (kind === 'req') {
-      const { status, data } = await api(`/api/bp/projects/${pid}/requirements`, { method: 'POST', body: JSON.stringify({ text: fd.get('text'), category: fd.get('category') || undefined, feature_id: form.dataset.fid ? Number(form.dataset.fid) : undefined }) });
+      const { status, data } = await api(`/api/bp/projects/${pid}/requirements`, { method: 'POST', body: JSON.stringify({ text: fd.get('text'), category: fd.get('category') || undefined, feature_id: form.dataset.fid ? Number(form.dataset.fid) : undefined, section_id: form.dataset.sid ? Number(form.dataset.sid) : undefined }) });
       if (status !== 200) throw new Error(data.error || 'failed');
       notePending(data);
+    } else if (kind === 'section') {
+      const { status, data } = await api(`/api/bp/projects/${pid}/sections`, { method: 'POST', body: JSON.stringify({ title: fd.get('title'), parent_id: form.dataset.parent ? Number(form.dataset.parent) : undefined }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
+      notePending(data);
+    } else if (kind === 'section-edit') {
+      const { status, data } = await api(`/api/bp/sections/${form.dataset.sid}`, { method: 'PATCH', body: JSON.stringify({ title: fd.get('title'), description: fd.get('description'), parent_id: fd.get('parent_id') ? Number(fd.get('parent_id')) : null }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
+      notePending(data);
+    } else if (kind === 'comment') {
+      const { status, data } = await api(`/api/bp/projects/${pid}/comments`, { method: 'POST', body: JSON.stringify({ body: fd.get('body'), entity_type: form.dataset.etype, entity_id: form.dataset.eid ? Number(form.dataset.eid) : undefined }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
+    } else if (kind === 'request') {
+      const { status, data } = await api(`/api/bp/projects/${pid}/requests`, { method: 'POST', body: JSON.stringify({ kind: fd.get('kind'), title: fd.get('title'), body: fd.get('body'), assignee_email: fd.get('assignee_email') || undefined }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
     } else if (kind === 'feature') {
       const { status, data } = await api(`/api/bp/projects/${pid}/features`, { method: 'POST', body: JSON.stringify({ title: fd.get('title'), category: fd.get('category'), how_it_works: fd.get('how_it_works'), integration_needs: fd.get('integration_needs'), execution_notes: fd.get('execution_notes') }) });
       if (status !== 200) throw new Error(data.error || 'failed');
       notePending(data);
     } else if (kind === 'milestone') {
-      const { status, data } = await api(`/api/bp/projects/${pid}/milestones`, { method: 'POST', body: JSON.stringify({ title: fd.get('title'), description: fd.get('description'), due_date: fd.get('due_date') || undefined }) });
+      const { status, data } = await api(`/api/bp/projects/${pid}/milestones`, { method: 'POST', body: JSON.stringify({ title: fd.get('title'), description: fd.get('description'), due_date: fd.get('due_date') || undefined, section_id: fd.get('section_id') ? Number(fd.get('section_id')) : undefined, assignee_email: fd.get('assignee_email') || undefined }) });
       if (status !== 200) throw new Error(data.error || 'failed');
       notePending(data);
     } else if (kind === 'member') {
@@ -927,8 +1335,21 @@ viewEl.addEventListener('submit', async (e) => {
          form.dataset.section === 'ui_suggested' ? 'UI Suggested — ' + featTitle(Number(form.dataset.fid)) : file.name);
       const { status, data } = await api(`/api/bp/projects/${pid}/uploads`, {
         method: 'POST',
-        body: JSON.stringify({ section: form.dataset.section, title, filename: file.name, mime: file.type || 'application/octet-stream', data_base64: b64, feature_id: form.dataset.fid ? Number(form.dataset.fid) : undefined }),
+        body: JSON.stringify({ section: form.dataset.section, title, filename: file.name, mime: file.type || 'application/octet-stream', data_base64: b64, feature_id: form.dataset.fid ? Number(form.dataset.fid) : undefined, concept_id: form.dataset.concept ? Number(form.dataset.concept) : undefined }),
       });
+      if (status !== 200) throw new Error(data.error || 'failed');
+      notePending(data);
+    } else if (kind === 'concept-add') {
+      const { status, data } = await api(`/api/bp/projects/${pid}/concepts`, { method: 'POST', body: JSON.stringify({ title: fd.get('title') }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
+      notePending(data);
+    } else if (kind === 'concept-rename') {
+      const { status, data } = await api(`/api/bp/concepts/${form.dataset.cid}`, { method: 'PATCH', body: JSON.stringify({ title: fd.get('title') }) });
+      if (status !== 200) throw new Error(data.error || 'failed');
+      notePending(data);
+    } else if (kind === 'upload-move') {
+      const v = (fd.get('concept_id') || '').toString();
+      const { status, data } = await api(`/api/bp/uploads/${form.dataset.uid}`, { method: 'PATCH', body: JSON.stringify({ concept_id: v ? Number(v) : null }) });
       if (status !== 200) throw new Error(data.error || 'failed');
       notePending(data);
     }
