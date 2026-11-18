@@ -11,7 +11,7 @@
 //   FROM_EMAIL          - sender on verified domain (default: hire@rivaleclipse.dev)
 //   DISCORD_WEBHOOK_URL - channel webhook for brief delivery (optional for now)
 // Bindings:
-//   AI                  - Workers AI binding (image moderation via LLaVA vision model)
+//   AI                  - Workers AI binding (image moderation via Moondream vision model)
 
 const MAX_FILES = 3;
 const MAX_FILE_BYTES = 4 * 1024 * 1024; // 4 MB per image
@@ -104,20 +104,29 @@ function b64(bytes) {
 // ---------- image moderation (Cloudflare Workers AI vision) ----------
 // Uses the Workers AI binding `AI` (no external account or key needed).
 // Fail closed: if the binding is missing or the check errors, uploads are refused.
-async function moderateImage(env, bytes, filename) {
+// Model: Moondream 3.1 (@cf/moondream/moondream3.1-9B-A2B) — Cloudflare's
+// replacement for LLaVA, which is retired Nov 20, 2026 (calls then 410/5028).
+// NOTE: Moondream's API differs from LLaVA's — image is a base64 data URI
+// (not a byte array), the prompt is `question` (not `prompt`), and the
+// answer comes back in `answer` (not `response`).
+async function moderateImage(env, bytes, filename, mime) {
   if (!env.AI) return { ok: false, reason: 'scanner_unavailable' };
   let res;
   try {
-    res = await env.AI.run('@cf/llava-hf/llava-1.5-7b-hf', {
-      image: [...bytes],
-      prompt: 'Look at this image. Does it show any of the following: (1) nudity, sexual acts, or sexually explicit content, (2) gore, blood, dismemberment, or graphic injury, (3) shocking violent content? Answer with exactly one word: YES or NO.',
+    const dataUri = `data:${mime || 'image/jpeg'};base64,${b64(bytes)}`;
+    res = await env.AI.run('@cf/moondream/moondream3.1-9B-A2B', {
+      task: 'query',
+      image: dataUri,
+      question: 'Look at this image. Does it show any of the following: (1) nudity, sexual acts, or sexually explicit content, (2) gore, blood, dismemberment, or graphic injury, (3) shocking violent content? Answer with exactly one word: YES or NO.',
       max_tokens: 8,
+      reasoning: false,
+      temperature: 0,
     });
   } catch (e) {
     console.log('moderation model error', String(e));
     return { ok: false, reason: 'scanner_error' };
   }
-  const answer = String(res && res.response || res && res.description || '').trim().toUpperCase();
+  const answer = String(res && res.answer || res && res.response || res && res.description || '').trim().toUpperCase();
   if (!answer) {
     console.log('moderation model gave no answer');
     return { ok: false, reason: 'scanner_error' };
@@ -317,7 +326,7 @@ export async function onRequestPost({ request, env }) {
       return json({ ok: false, error: 'file_too_large', detail: fname }, 400, origin);
     }
     const bytes = new Uint8Array(await f.arrayBuffer());
-    const mod = await moderateImage(env, bytes, fname);
+    const mod = await moderateImage(env, bytes, fname, f.type);
     if (!mod.ok) {
       if (mod.reason === 'scanner_unavailable' || mod.reason === 'scanner_error') {
         return json({ ok: false, error: 'uploads_unavailable' }, 503, origin);
